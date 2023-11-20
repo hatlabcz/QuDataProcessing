@@ -1,0 +1,6 @@
+
+*.xml
+*.iml
+*.pyc
+QuDataProcessing.egg-info/
+__pycache__/
