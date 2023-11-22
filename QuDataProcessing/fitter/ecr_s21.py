@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import lmfit
 from lmfit.model import ModelResult
+from tqdm import tqdm
 from QuDataProcessing.fitter.fitter_base import Fit, FitResult
 from QuDataProcessing.helpers.unit_converter import freqUnit, rounder, realImag2magPhase
 from QuDataProcessing.analyzer.cut_peak import cut_peak
@@ -101,6 +102,7 @@ class ECR_S21_MultiMode(Fit):
         """ fit cavity reflection function
         :param conjugate: fit to conjugated cavity reflection function (for VNA data)
         """
+        raise NotImplementedError("This module is not finished, might be incorrect actually.")
         self.coordinates = coordinates
         self.data = data
         self.nmodes = nmodes
@@ -170,6 +172,69 @@ class ECR_S21Multi_Result():
                   f'{rounder(self.params[f"p{i+1}_fn"].stderr, 5)}')
             print(f'p{i+1}_Ql": {rounder(self.__getattribute__(f"p{i+1}_Ql"), 5)}+-'
                   f'{rounder(self.params[f"p{i+1}_Ql"].stderr, 5)}')
+
+
+def discrete_nl2_fit(freq_data, s21_mag, peak0_region, plot=True, window_size=2):
+    """
+    fit the Qs of the nλ/2 modes in a strip resonator
+    :param freq_data: freq in hertz
+    :param s21_mag: s21 mag in linear unit
+    :param peak0_region: [peak0_start_freq, peak0_stop_freq]
+    :param plot: when True, plot results
+    :param window_size: window size for peak fitting, in unit of the auto guessed kappa
+    :return:
+    """
+    # -------- fit first peak -----------------
+    valid_idx = np.where((freq_data > peak0_region[0]) & (freq_data < peak0_region[1]))[0]
+    fit = ECR_S21(freq_data[valid_idx], s21_mag[valid_idx])
+    fit_result = fit.run()
+    if plot:
+        fit_result.plot(title="first peak fitting")
+    f0 = fit_result.fn
+    kappa0 = fit_result.kappa_2pi
+
+    # # --------- fit all peaks -------------
+    npeaks = int(freq_data[-1] / f0)
+    fn_list = np.zeros(npeaks)
+    Qn_list = np.zeros(npeaks)
+    Qn_std_list = np.zeros(npeaks)
+
+    if plot:
+        fig, ax = plt.subplots(figsize=(20, 6))
+    fn = 0
+    kappan = kappa0
+    for i in tqdm(range(npeaks)):
+        for j in range(2):  # two passes
+            if j == 0:  # first try to fit with guessed region
+                f_start, f_stop = fn + f0 - kappan * window_size, fn + f0 + kappan * window_size
+            else:  # fit based on the first fitting results
+                f_start, f_stop = fn - kappan * window_size, fn + kappan * window_size
+            valid_idx = np.where((freq_data > f_start) & (freq_data < f_stop))[0]
+            fit = ECR_S21(freq_data[valid_idx], s21_mag[valid_idx])
+            fit_result = fit.run()
+            fn = fit_result.fn
+            Qn = fit_result.Ql
+            kappan = fn / Qn  # kappa/2pi
+            if np.abs(fn - f0 * (i + 1)) >= 10 * kappa0:
+                print(fit.guess(fit.coordinates, fit.data))
+                raise RuntimeError
+
+        fn_list[i] = fn
+        Qn_list[i] = Qn
+        Qn_std_list[i] = fit_result.lmfit_result.params["Ql"].stderr
+        if plot:
+            fit_result.plot(plot_ax=ax)
+
+    if plot:
+        fig.tight_layout()
+        plt.figure(figsize=(12, 5))
+        plt.errorbar(fn_list / 1e9, Qn_list, yerr=Qn_std_list)
+        plt.xlabel("freq (GHz)")
+        plt.ylabel("Q")
+
+    return fn_list, Qn_list, Qn_std_list
+
+
 
 if __name__ == '__main__':
     pass
