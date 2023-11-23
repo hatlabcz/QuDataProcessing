@@ -174,7 +174,7 @@ class ECR_S21Multi_Result():
                   f'{rounder(self.params[f"p{i+1}_Ql"].stderr, 5)}')
 
 
-def discrete_nl2_fit(freq_data, s21_mag, peak0_region, plot=True, window_size=2):
+def discrete_nl2_fit(freq_data, s21_mag, peak0_region, plot=True, window_size=None):
     """
     fit the Qs of the nλ/2 modes in a strip resonator
     :param freq_data: freq in hertz
@@ -193,6 +193,11 @@ def discrete_nl2_fit(freq_data, s21_mag, peak0_region, plot=True, window_size=2)
     f0 = fit_result.fn
     kappa0 = fit_result.kappa_2pi
 
+    if window_size is None:
+        window_size_ = fit_result.Ql/200
+    else:
+        window_size_ = window_size
+
     # # --------- fit all peaks -------------
     npeaks = int(freq_data[-1] / f0)
     fn_list = np.zeros(npeaks)
@@ -200,24 +205,27 @@ def discrete_nl2_fit(freq_data, s21_mag, peak0_region, plot=True, window_size=2)
     Qn_std_list = np.zeros(npeaks)
 
     if plot:
-        fig, ax = plt.subplots(figsize=(20, 6))
+        fig, ax = plt.subplots(figsize=(15, 6))
     fn = 0
     kappan = kappa0
     for i in tqdm(range(npeaks)):
         for j in range(2):  # two passes
             if j == 0:  # first try to fit with guessed region
-                f_start, f_stop = fn + f0 - kappan * window_size, fn + f0 + kappan * window_size
+                f_start, f_stop = fn + peak0_region[0], fn + peak0_region[1]
             else:  # fit based on the first fitting results
-                f_start, f_stop = fn - kappan * window_size, fn + kappan * window_size
+                f_start, f_stop = fn - kappan * window_size_, fn + kappan * window_size_
             valid_idx = np.where((freq_data > f_start) & (freq_data < f_stop))[0]
             fit = ECR_S21(freq_data[valid_idx], s21_mag[valid_idx])
             fit_result = fit.run()
             fn = fit_result.fn
             Qn = fit_result.Ql
             kappan = fn / Qn  # kappa/2pi
-            if np.abs(fn - f0 * (i + 1)) >= 10 * kappa0:
-                print(fit.guess(fit.coordinates, fit.data))
-                raise RuntimeError
+
+            if window_size is None:
+                window_size_ = fit_result.Ql/200
+            # if np.abs(fn - f0 * (i + 1)) >= 10 * kappa0:
+            #     print(fit.guess(fit.coordinates, fit.data))
+            #     raise RuntimeError
 
         fn_list[i] = fn
         Qn_list[i] = Qn
@@ -227,7 +235,7 @@ def discrete_nl2_fit(freq_data, s21_mag, peak0_region, plot=True, window_size=2)
 
     if plot:
         fig.tight_layout()
-        plt.figure(figsize=(12, 5))
+        plt.figure(figsize=(6, 5))
         plt.errorbar(fn_list / 1e9, Qn_list, yerr=Qn_std_list)
         plt.xlabel("freq (GHz)")
         plt.ylabel("Q")
