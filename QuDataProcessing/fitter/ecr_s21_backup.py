@@ -13,12 +13,14 @@ TWOPI = 2 * np.pi
 PI = np.pi
 
 
+
+
 def ecr_f21(coordinates, Ql, fn, sn, c1, c2):
     """"
     end coupled resonator
     Kurpiers et al. EPJ Quantum Technology  (2017) 4:8
     DOI 10.1140/epjqt/s40507-017-0059-7"""
-    s21 = sn / np.sqrt(1 + 4 * (coordinates / fn - 1) ** 2 * Ql ** 2) + c1 + c2 * coordinates
+    s21 = sn/np.sqrt(1 + 4 * (coordinates/fn-1)**2 * Ql**2) + c1 + c2 * coordinates
     return s21
 
 
@@ -32,8 +34,8 @@ class ECR_S21Result():
         self.freqData = lmfit_result.userkws[lmfit_result.model.independent_vars[0]]
 
     def plot(self, title='s21  dB', plot_ax=None, **figArgs):
-        mag_fit = 20 * np.log10(self.lmfit_result.best_fit)
-        mag_data = 20 * np.log10(self.lmfit_result.data.real)
+        mag_fit = 20*np.log10(self.lmfit_result.best_fit)
+        mag_data = 20*np.log10(self.lmfit_result.data.real)
 
         fig_args_ = dict(figsize=(6, 5))
         fig_args_.update(figArgs)
@@ -46,14 +48,14 @@ class ECR_S21Result():
         ax.plot(self.freqData, mag_data, '.')
         ax.plot(self.freqData, mag_fit)
         plt.show()
-
+        
         return ax
 
     def print(self):
 
         print(f'fn: {rounder(self.fn, 5)}+-{rounder(self.params["fn"].stderr, 5)}')
         print(f'Ql: {rounder(self.Ql, 5)}+-{rounder(self.params["Ql"].stderr, 5)}')
-        print(f'kappa_int/2pi (MHz): {self.fn / self.Ql / 1e6}')
+        print(f'kappa_int/2pi (MHz): {self.fn/self.Ql/1e6}')
 
 
 class ECR_S21(Fit):
@@ -75,15 +77,15 @@ class ECR_S21(Fit):
     def guess(coordinates, data):
         freq = coordinates
 
-        c2Guess = (data[-1] - data[0]) / (freq[-1] - freq[0])
+        c2Guess =  (data[-1] - data[0])/(freq[-1]-freq[0])
         snGuess = data[0]
         fnGuess = freq[np.argmax(data)]
-        QlGuess = fnGuess / (freq[-1] - freq[0]) * 4
+        QlGuess = fnGuess / (freq[-1]-freq[0]) * 4
         c1Guess = data[0]
 
-        Ql = lmfit.Parameter("Ql", value=QlGuess, min=QlGuess/100, max=fnGuess / (freq[1] - freq[0]) * 1) # todo: to be tuned
+        Ql = lmfit.Parameter("Ql", value=QlGuess, min=QlGuess / 100, max=QlGuess * 100)
         sn = lmfit.Parameter("sn", value=snGuess, min=0)
-        fn = lmfit.Parameter("fn", value=fnGuess, min=fnGuess - (freq[-1] - freq[0])*0.2, max=fnGuess + (freq[-1] - freq[0])*0.2)
+        fn = lmfit.Parameter("fn", value=fnGuess, min=freq[0], max=freq[-1])
         c1 = lmfit.Parameter("c1", value=c1Guess)
         c2 = lmfit.Parameter("c2", value=c2Guess)
 
@@ -108,8 +110,9 @@ class ECR_S21_MultiMode(Fit):
 
         model = lmfit.Model(ecr_f21, prefix='p1_')
         for i in range(1, nmodes):
-            model = model + lmfit.Model(ecr_f21, prefix=f"p{i + 1}_")
+            model = model + lmfit.Model(ecr_f21, prefix= f"p{i+1}_")
         self.model = model
+
 
     def guess(self, coordinates, data):
         freq = coordinates
@@ -122,14 +125,14 @@ class ECR_S21_MultiMode(Fit):
             QlGuess = fnGuess / (freq[-1] - freq[0]) * 4
             c1Guess = data[0]
 
-            Ql = lmfit.Parameter(f"p{i + 1}_Ql", value=QlGuess, min=QlGuess / 100, max=QlGuess * 100)
-            c2 = lmfit.Parameter(f"p{i + 1}_c2", value=c2Guess)
-            sn = lmfit.Parameter(f"p{i + 1}_sn", value=snGuess, min=0)
-            fn = lmfit.Parameter(f"p{i + 1}_fn", value=fnGuess, min=freq[0], max=freq[-1])
-            c1 = lmfit.Parameter(f"p{i + 1}_c1", value=c1Guess)
-            guess_dict.update({f"p{i + 1}_Ql": Ql, f"p{i + 1}_c2": c2,
-                               f"p{i + 1}_c1": c1, f"p{i + 1}_sn": sn,
-                               f"p{i + 1}_fn": fn})
+            Ql = lmfit.Parameter(f"p{i+1}_Ql", value=QlGuess, min=QlGuess / 100, max=QlGuess * 100)
+            c2 = lmfit.Parameter(f"p{i+1}_c2", value=c2Guess)
+            sn = lmfit.Parameter(f"p{i+1}_sn", value=snGuess, min=0)
+            fn = lmfit.Parameter(f"p{i+1}_fn", value=fnGuess, min=freq[0], max=freq[-1])
+            c1 = lmfit.Parameter(f"p{i+1}_c1", value=c1Guess)
+            guess_dict.update({f"p{i+1}_Ql": Ql, f"p{i+1}_c2": c2,
+                               f"p{i+1}_c1": c1, f"p{i+1}_sn": sn,
+                               f"p{i+1}_fn": fn})
             new_data, cut_idx_l, cut_idx_r = cut_peak(data, 0.6, plot=False)
             data = new_data
             print(f"{freq[cut_idx_l]}, {freq[cut_idx_r]}")
@@ -145,15 +148,15 @@ class ECR_S21Multi_Result():
     def __init__(self, lmfit_result: lmfit.model.ModelResult, nmodes):
         self.lmfit_result = lmfit_result
         self.params = lmfit_result.params
-        self.nmodes = nmodes
+        self.nmodes=nmodes
         for i in range(nmodes):
-            self.__setattr__(f"p{i + 1}_Ql", self.params[f"p{i + 1}_Ql"].value)
-            self.__setattr__(f"p{i + 1}_fn", self.params[f"p{i + 1}_fn"].value)
+            self.__setattr__(f"p{i+1}_Ql", self.params[f"p{i+1}_Ql"].value)
+            self.__setattr__(f"p{i+1}_fn", self.params[f"p{i+1}_fn"].value)
         self.freqData = lmfit_result.userkws[lmfit_result.model.independent_vars[0]]
 
     def plot(self, **figArgs):
-        mag_fit = 20 * np.log10(self.lmfit_result.best_fit)
-        mag_data = 20 * np.log10(self.lmfit_result.data.real)
+        mag_fit = 20*np.log10(self.lmfit_result.best_fit)
+        mag_data = 20*np.log10(self.lmfit_result.data.real)
 
         fig_args_ = dict(figsize=(6, 5))
         fig_args_.update(figArgs)
@@ -165,10 +168,10 @@ class ECR_S21Multi_Result():
 
     def print(self):
         for i in range(self.nmodes):
-            print(f'p{i + 1}_fn": {rounder(self.__getattribute__(f"p{i + 1}_fn"), 5)}+-'
-                  f'{rounder(self.params[f"p{i + 1}_fn"].stderr, 5)}')
-            print(f'p{i + 1}_Ql": {rounder(self.__getattribute__(f"p{i + 1}_Ql"), 5)}+-'
-                  f'{rounder(self.params[f"p{i + 1}_Ql"].stderr, 5)}')
+            print(f'p{i+1}_fn": {rounder(self.__getattribute__(f"p{i+1}_fn"), 5)}+-'
+                  f'{rounder(self.params[f"p{i+1}_fn"].stderr, 5)}')
+            print(f'p{i+1}_Ql": {rounder(self.__getattribute__(f"p{i+1}_Ql"), 5)}+-'
+                  f'{rounder(self.params[f"p{i+1}_Ql"].stderr, 5)}')
 
 
 def discrete_nl2_fit(freq_data, s21_mag, peak0_region, peak0_n=1, plot=True, window_size=None):
@@ -192,7 +195,7 @@ def discrete_nl2_fit(freq_data, s21_mag, peak0_region, peak0_n=1, plot=True, win
     kappa0 = fit_result.kappa_2pi
 
     if window_size is None:
-        window_size_ = fit_result.Ql / 200
+        window_size_ = fit_result.Ql/200
     else:
         window_size_ = window_size
 
@@ -203,18 +206,17 @@ def discrete_nl2_fit(freq_data, s21_mag, peak0_region, peak0_n=1, plot=True, win
 
     if plot:
         fig, ax = plt.subplots(figsize=(15, 6))
-    fn = f0 - f0 / peak0_n
+    fn = f0 - f0/peak0_n
     kappan = kappa0
     done = False
     while True:
-        for j in range(4):  # two passes
+        for j in range(2):  # two passes
             if j == 0:  # first try to fit with guessed region
-                f_start, f_stop = fn + peak0_region[0] - f0 + f0 / peak0_n, fn + peak0_region[1] - f0 + f0 / peak0_n
+                f_start, f_stop = fn + peak0_region[0]- f0 + f0/peak0_n, fn + peak0_region[1]- f0 + f0/peak0_n
             else:  # fit based on the first fitting results
                 f_start, f_stop = fn - kappan * window_size_, fn + kappan * window_size_
 
-
-            if (f_start + f_stop) / 2 > freq_data[-1]:
+            if (f_start + f_stop)/2 > freq_data[-1]:
                 done = True
                 break
 
@@ -226,10 +228,11 @@ def discrete_nl2_fit(freq_data, s21_mag, peak0_region, peak0_n=1, plot=True, win
             kappan = fn / Qn  # kappa/2pi
 
             if window_size is None:
-                window_size_ = fit_result.Ql / 250
+                window_size_ = fit_result.Ql/200
             # if np.abs(fn - f0 * (i + 1)) >= 10 * kappa0:
             #     print(fit.guess(fit.coordinates, fit.data))
             #     raise RuntimeError
+
         if done:
             break
 
@@ -239,9 +242,7 @@ def discrete_nl2_fit(freq_data, s21_mag, peak0_region, peak0_n=1, plot=True, win
         if plot:
             fit_result.plot(plot_ax=ax)
 
-    fn_list = np.array(fn_list, dtype='float64')
-    Qn_list = np.array(Qn_list, dtype='float64')
-    Qn_std_list = np.array(Qn_std_list, dtype='float64')
+    print(Qn_std_list)
 
     if plot:
         fig.tight_layout()
@@ -251,6 +252,7 @@ def discrete_nl2_fit(freq_data, s21_mag, peak0_region, peak0_n=1, plot=True, win
         plt.ylabel("Q")
 
     return np.array(fn_list), np.array(Qn_list), np.array(Qn_std_list)
+
 
 
 if __name__ == '__main__':
