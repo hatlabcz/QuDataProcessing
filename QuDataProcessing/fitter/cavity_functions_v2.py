@@ -1,9 +1,10 @@
 from typing import Tuple, Any, Optional, Union, Dict, List
-
+from scipy.optimize import minimize, newton, least_squares
+from scipy import linalg
 import numpy as np
 import matplotlib.pyplot as plt
 import lmfit
-from lmfit.model import ModelResult
+from lmfit.model import ModelResult, Model, Parameter
 from QuDataProcessing.fitter.fitter_base import Fit, FitResult
 from QuDataProcessing.helpers.unit_converter import freqUnit, rounder, realImag2magPhase
 
@@ -11,251 +12,521 @@ TWOPI = 2 * np.pi
 PI = np.pi
 
 
-def getVNAData(filename, freq_unit='Hz', plot=1, trim=0):
-    trim_end = None if trim == 0 else -trim
-    f = h5py.File(filename, 'r')
-    freq = f['Freq'][()][trim: trim_end] * freqUnit(freq_unit)
-    phase = f['S21'][()][1][trim: trim_end] / 180 * np.pi
-    mag = f['S21'][()][0][trim: trim_end]
-    f.close()
-
-    lin = 10 ** (mag / 20.0)
-    real = lin * np.cos(phase)
-    imag = lin * np.sin(phase)
-
-    if plot:
-        plt.figure('mag')
-        plt.plot(freq / 2 / np.pi, mag)
-        plt.figure('phase')
-        plt.plot(freq / 2 / np.pi, phase)
-
-    return (freq, real, imag, mag, phase)
+def core_func(f, f0, Ql, Qc):
+    """
+    core function of for all three different configurations
+    :param f: probe freq
+    :param f0: mode freq
+    :param Ql: total Q
+    :param Qc: coupling Q
+    :return:
+    """
+    x = f / f0 - 1
+    nume = Ql / Qc
+    denom = 1 + 2j * Ql * x
+    return nume / denom
 
 
-def refl_func(freq, Qext, Qint, f0):
-    """"reflection function of a resonator"""
-    omega0 = f0 * TWOPI
-    delta = freq * TWOPI - omega0
-    S_11_nume = 1 - Qint / Qext + 1j * 2 * Qint * delta / omega0
-    S_11_denom = 1 + Qint / Qext + 1j * 2 * Qint * delta / omega0
-    S11 = (S_11_nume / S_11_denom)
-    return S11
+def instrument_factor(f, amp, phase_off, e_delay):
+    """
+    pre factor on the msmt result due to msmt setup
+    :param f: probe freq
+    :param amp: attenuation, gain in the msmt chain
+    :param phase_off: phase offset
+    :param e_delay: electrical delay
+    :return:
+    """
+    return amp * np.exp(1j * (phase_off - TWOPI * f * e_delay))
 
 
-def hanger_func(freq, Qext, Qint, f0):
-    """"reflection function of a resonator"""
-    omega0 = f0 * TWOPI
-    delta = freq * TWOPI - omega0
-    S_11_nume = 1 - Qint / Qext + 1j * 2 * Qint * delta / omega0
-    S_11_denom = 1 + Qint / Qext + 1j * 2 * Qint * delta / omega0
-    S11 = (S_11_nume / S_11_denom)
-    return S11
-
-def trans_func(freq, Qext, Qint, f0):
-    """"reflection function of a resonator"""
-    omega0 = f0 * TWOPI
-    delta = freq * TWOPI - omega0
-    S_11_nume = 1 - Qint / Qext + 1j * 2 * Qint * delta / omega0
-    S_11_denom = 1 + Qint / Qext + 1j * 2 * Qint * delta / omega0
-    S11 = (S_11_nume / S_11_denom)
-    return S11
+def hanger_func(f, f0, Ql, Qc_m, amp, phase_off, e_delay, phi):
+    pre_ = instrument_factor(f, amp, phase_off, e_delay)
+    core_ = core_func(f, f0, Ql, Qc_m)
+    s21 = pre_ * (1 - core_ * np.exp(1j * phi))
+    return s21
 
 
+def refl_func(f, f0, Ql, Qc, amp, phase_off, e_delay):
+    pre_ = instrument_factor(f, amp, phase_off, e_delay)
+    core_ = core_func(f, f0, Ql, Qc)
+    s11 = pre_ * (1 - 2 * core_)
+    return s11
 
-class CavReflectionResult():
-    def __init__(self, lmfit_result: lmfit.model.ModelResult):
-        self.lmfit_result = lmfit_result
-        self.params = lmfit_result.params
-        self.f0 = self.params["f0"].value
-        self.Qext = self.params["Qext"].value
-        self.Qint = self.params["Qint"].value
-        self.Qtot = self.Qext * self.Qint / (self.Qext + self.Qint)
-        self.freqData = lmfit_result.userkws[lmfit_result.model.independent_vars[0]]
+
+def trans_func(f, f0, Ql, amp, phase_off, e_delay):
+    pre_ = instrument_factor(f, amp, phase_off, e_delay)
+    core_ = core_func(f, f0, Ql, 1) #Qc absorbed into amp
+    s21 = pre_ * 2 * core_
+    return s21
+
+
+def fit_circle(x, y):
+    """
+    fit complex data (x, y) to a circle on the complex plane
+    :param x:
+    :param y:
+    :return:
+    """
+    z = x ** 2 + y ** 2
+    v = np.array([z, x, y, np.ones_like(x)])
+    M = np.matmul(v, v.T)
+    B = np.zeros((4, 4))
+    B[0, 3] = B[3, 0] = -2
+
+    """ 
+    this is mathematically correct, and looks efficient, but doesn't work as well as the 
+    Newton method, because of machine precision issue... The M matrix can have a huge condition number... 
+    
+    # M - eta_ * B is a quadratic function (since B only have two non-zero elements),
+    # we just need to find the coefficients for this quadratic function
+    c2 = 4 * (M[1, 2] * M[2, 1] - M[1, 1] * M[2, 2])
+    c0 = linalg.det(M)
+    c1 = linalg.det(M - B) - c2 - c0
+
+    # eta_ is minimum positive root for the quadratic function
+    c_dis = np.sqrt(c1 ** 2 - 4 * c2 * c0)
+    v1, v2 = (-c1 + c_dis) / 2 / c2, (-c1 - c_dis) / 2 / c2
+    print(v1, v2)
+    eta_ = min([v_ for v_ in [v1, v2] if v_ > 0], default=None)
+    """
+
+    def solve_eta(eta):
+        return linalg.det(M - eta * B)
+
+    eta_ = newton(solve_eta, 0)
+
+    a, b, c, d = linalg.null_space(M - eta_ * B)[:, 0]
+    x0 = - b / 2 / a
+    y0 = - c / 2 / a
+    r0 = np.sqrt(b ** 2 + c ** 2 - 4 * a * d) / 2 / abs(a)
+
+    return x0, y0, r0
+
+
+def guess_e_delay(freq, data, debug=True):
+    """
+    guess electrical delay
+    :param freq: frequency array
+    :param data: complex data array
+    :return:
+    """
+    phase = np.unwrap(np.angle(data))
+    # tau = -(phase[-1] - phase[0]) / (freq[-1] - freq[0]) / TWOPI # only works fine for hanger
+    npts = len(freq)
+    k1, b1 = np.polyfit(freq[:npts // 10], phase[:npts // 10], 1)
+    k2, b2 = np.polyfit(freq[-npts // 10:], phase[-npts // 10:], 1)
+    tau = -(k1 + k2) / 2 / TWOPI
+
+    if debug:
+        plt.figure()
+        plt.plot(freq, phase)
+        plt.plot(freq, k1 * freq + b1)
+        plt.plot(freq, k2 * freq + b2)
+        print("!!!!!!!!!!!!!!!!!! guess e_delay", tau)
+
+    return tau
+
+
+def fit_e_delay(freq, data):
+    """
+    find the e_delay that makes the curve most closely to a circle
+    :param freq: frequency array
+    :param data: complex data array
+    :return:
+    """
+
+    def circ_residual(tau):
+        rot_data = np.exp(1j * TWOPI * freq * tau) * data
+        x, y = rot_data.real, rot_data.imag
+        x0, y0, r0 = fit_circle(x, y)
+        return np.sum(abs(r0 ** 2 - (x - x0) ** 2 - (y - y0) ** 2))
+
+    tau0 = guess_e_delay(freq, data)
+    tau_fit = least_squares(circ_residual, tau0, method="lm").x[0]
+
+    return tau_fit
+
+
+def fit_phase(freq, phase):
+    def phse_func(f, theta0, Ql, f0):
+        theta = theta0 - 2 * np.arctan(2 * Ql * (f / f0 - 1))
+        return theta
+
+    model = Model(phse_func)
+    theta0_gue = (phase[0] + phase[-1]) / 2
+    f0_gue = freq[np.argmin(np.abs(phase - theta0_gue))]
+    Ql_gue = np.mean(freq) / (np.max(freq) - np.min(freq)) * 5
+    params = {}
+    params["theta0"] = Parameter("theta0", theta0_gue)
+    params["f0"] = Parameter("f0", f0_gue, min=np.min(freq), max=np.max(freq))
+    params["Ql"] = Parameter("Ql", Ql_gue, min=Ql_gue / 50, max=Ql_gue * 50)
+    fit_result = model.fit(phase, f=freq, **params)
+
+    return fit_result
+
+
+class ResonatorFit(Fit):
+    def __init__(self, coordinates: Union[Tuple[np.ndarray, ...], np.ndarray],
+                 data: np.ndarray):
+        self.coordinates = coordinates
+        self.data = data
+        self.pre_process()
+
+    def _fit_circ_and_phase(self, debug=True):
+        freq = self.coordinates
+        data = self.data
+
+        # fit for e_delay
+        self.e_delay = fit_e_delay(freq, data)
+        # circle data after fixing e_delay
+        data_cir = data * np.exp(1j * self.e_delay * TWOPI * freq)
+        # fitted circle
+        self.xc, self.yc, self.rc = fit_circle(data_cir.real, data_cir.imag)
+        # translate circle data to origin
+        data_tr = data_cir - (self.xc + 1j * self.yc)
+
+        # phase fit
+        data_tr_phase = np.unwrap(np.angle(data_tr))
+        phase_fit_res = fit_phase(freq, data_tr_phase)
+        self.theta0 = phase_fit_res.params["theta0"].value
+        self.Ql = phase_fit_res.params["Ql"].value
+        self.f0 = phase_fit_res.params["f0"].value
+
+        if debug:
+            fig, ax = plt.subplots(1, 2, figsize=(12,5))
+            ax[0].set_title("circle_fit")
+            ax[0].plot(data.real, data.imag, ".")
+            ax[0].plot(data_cir.real, data_cir.imag, ".")
+            theta_ = np.linspace(0, TWOPI, 1001)
+            ax[0].plot(self.xc + self.rc * np.cos(theta_), self.yc + self.rc * np.sin(theta_))
+            ax[0].plot(data_tr.real, data_tr.imag, ".")
+            ax[0].set_aspect(1)
+            ax[1].set_title("phase fit")
+            ax[1].plot(freq, data_tr_phase, ".")
+            ax[1].plot(freq, phase_fit_res.best_fit)
+
+
+class ResonatorResult():
+    def __init__(self, freq, data, params):
+        self.freq = freq
+        self.data = data
+        self.params = params
+        self.model = params.pop("model")
+        self.f0 = params["f0"]
+        self.Ql = params["Ql"]
 
     def plot(self, **figArgs):
-        real_fit = self.lmfit_result.best_fit.real
-        imag_fit = self.lmfit_result.best_fit.imag
+        fitted_data = self.model(self.freq, **self.params)
+        real_fit = fitted_data.real
+        imag_fit = fitted_data.imag
         mag_fit, phase_fit = realImag2magPhase(real_fit, imag_fit)
-        mag_data, phase_data = realImag2magPhase(self.lmfit_result.data.real,
-                                                 self.lmfit_result.data.imag)
+        mag_data, phase_data = realImag2magPhase(self.data.real, self.data.imag)
 
         fig_args_ = dict(figsize=(12, 5))
         fig_args_.update(figArgs)
         plt.figure(**fig_args_)
         plt.subplot(1, 2, 1)
         plt.title('mag (dB pwr)')
-        plt.plot(self.freqData, mag_data, '.')
-        plt.plot(self.freqData, mag_fit)
+        plt.plot(self.freq, mag_data, '.')
+        plt.plot(self.freq, mag_fit)
         plt.subplot(1, 2, 2)
         plt.title('phase')
-        plt.plot(self.freqData, phase_data, '.')
-        plt.plot(self.freqData, phase_fit)
+        plt.plot(self.freq, phase_data, '.')
+        plt.plot(self.freq, phase_fit)
         plt.show()
 
     def print(self):
-        print(f'f (Hz): {rounder(self.f0, 9)}+-{rounder(self.params["f0"].stderr, 9)}')
-        print(f'Qext: {rounder(self.Qext, 5)}+-{rounder(self.params["Qext"].stderr, 5)}')
-        print(f'Qint: {rounder(self.Qint, 5)}+-{rounder(self.params["Qint"].stderr, 5)}')
-        print('Q_tot: ', rounder(self.Qtot, 5))
-        print('T1 (s):', rounder(self.Qtot / self.f0 / 2 / np.pi, 5), '\nMaxT1 (s):',
-              rounder(self.Qint / self.f0 / 2 / np.pi, 5))
-        print('kappa_tot/2Pi: ', rounder(self.f0 / self.Qtot / 1e6), 'MHz')
+        print(f'f (Hz): {self.f0:.6e}')
+        print(f'Qtot: {self.Ql:.3e}')
+        if "Qc_m" in self.params:
+            print(f'|Qc|: {self.params["Qc_m"]:.3e}')
+        for k in ["Qc", "Qi"]:
+            try:
+                print(f'{k}: {self.__getattribute__(k):.3e}')
+            except AttributeError:
+                pass
+        print('T1 (us):', f"{(self.Ql / self.f0 / 2 / np.pi * 1e6):.3e}")
+        try:
+            print('MaxT1 (us):', f"{self.Qi / self.f0 / 2 / np.pi * 1e6:.3e}")
+        except AttributeError:
+            pass
+        print('kappa_tot/2Pi: ', f"{self.f0 / self.Ql / 1e6 :.4e}", 'MHz')
+        try:
+            print('kappa_c/2Pi: ', f"{self.f0 / self.Qc / 1e6 :.4e}", 'MHz')
+        except AttributeError:
+            pass
 
 
-class CavReflection(Fit):
+class HangerFit(ResonatorFit):
     def __init__(self, coordinates: Union[Tuple[np.ndarray, ...], np.ndarray],
-                 data: np.ndarray, conjugate:bool=True):
-        """ fit cavity reflection function
-        :param conjugate: fit to conjugated cavity reflection function (for VNA data)
-        """
-        self.coordinates = coordinates
-        self.data = data
-        self.conjugate = conjugate
-        self.pre_process()
-
-    def model(self, coordinates, Qext, Qint, f0, magBack, phaseOff) -> np.ndarray:
-        """"reflection function of a harmonic oscillator"""
-        S11 = cav_ref_func(coordinates, Qext, Qint, f0)
-        if self.conjugate:
-            S11 = S11.conjugate()
-        S11 *= magBack * np.exp(1j * phaseOff)
-        return S11
+                 data: np.ndarray):
+        super().__init__(coordinates, data)
 
     @staticmethod
-    def guess(coordinates, data):
-        freq = coordinates
-        phase = np.unwrap(np.angle(data))
-        amp = np.abs(data)
+    def model(coordinates, f0, Ql, Qc_m, amp, phase_off, e_delay, phi) -> np.ndarray:
+        s21 = hanger_func(coordinates, f0, Ql, Qc_m, amp, phase_off, e_delay, phi)
+        return s21
 
-        f0Guess = freq[np.argmin(amp)]  # smart guess of "it's probably the lowest point"
-        magBackGuess = np.average(amp[:int(len(freq) / 5)])
-        phaseOffGuess = phase[0]
+    def extract_params(self):
+        beta = self.theta0 + PI
+        x_ = self.xc + self.rc * np.cos(beta)
+        y_ = self.yc + self.rc * np.sin(beta)
+        phase_off = np.angle(x_ + 1j*y_)
+        amp = np.sqrt(x_**2 + y_**2)
+        phi = beta - phase_off
 
-        # guess algorithm from https://lmfit.github.io/lmfit-py/examples/example_complex_resonator_model.html
-        Q_min = 0.1 * (f0Guess / (freq[-1] - freq[0]))  # assume the user isn't trying to fit just a small part of a resonance curve
-        delta_f = np.diff(freq)  # assume f is sorted
-        min_delta_f = delta_f[delta_f > 0].min()
-        Q_max = f0Guess / min_delta_f  # assume data actually samples the resonance reasonably
-        QtotGuess = np.sqrt(Q_min * Q_max)  # geometric mean, why not?
-        QextGuess = 2 * QtotGuess / (1 - amp[np.argmin(amp)]/magBackGuess)
-        QintGuess = 1 / (1 / QtotGuess - 1 / QextGuess)
-
-        Qext = lmfit.Parameter("Qext", value=QextGuess, min=QextGuess / 2000, max=QextGuess * 1500)
-        Qint = lmfit.Parameter("Qint", value=QintGuess, min=QintGuess / 2000, max=QintGuess * 1500)
-        f0 = lmfit.Parameter("f0", value=f0Guess, min=freq[0], max=freq[-1])
-        magBack = lmfit.Parameter("magBack", value=magBackGuess, min=magBackGuess / 1.1, max=magBackGuess * 1.1)
-        phaseOff = lmfit.Parameter("phaseOff", value=phaseOffGuess, min=-TWOPI, max=TWOPI)
-
-        return dict(Qext=Qext, Qint=Qint, f0=f0, magBack=magBack, phaseOff=phaseOff)
-
-    def run(self, *args: Any, **kwargs: Any) -> CavReflectionResult:
-        lmfit_result = self.analyze(self.coordinates, self.data, *args, **kwargs)
-        return CavReflectionResult(lmfit_result)
+        Qc_m = self.Ql * amp/ (2 * self.rc)
+        Qc = Qc_m/np.cos(phi)
+        Qi = 1/(1/self.Ql - 1/Qc)
 
 
+        params = {"f0": self.f0, "Ql": self.Ql, "Qc_m": Qc_m, "amp": amp, "phase_off": phase_off,
+                  "e_delay": self.e_delay, "phi": phi, "Qc": Qc, "Qi": Qi, "model":self.model}
 
-class CavReflectionResult_Phase():
-    def __init__(self, lmfit_result: lmfit.model.ModelResult):
-        self.lmfit_result = lmfit_result
-        self.params = lmfit_result.params
-        self.eDelay = self.params["eDelay"].value
-        self.f0 = self.params["f0"].value
-        self.Qext = self.params["Qext"].value
-        self.Qint = self.params["Qint"].value
-        self.Qtot = self.Qext * self.Qint / (self.Qext + self.Qint)
-        self.freqData = lmfit_result.userkws[lmfit_result.model.independent_vars[0]]
+        return params
 
-    def plot(self, **figArgs):
-        phase_fit = self.lmfit_result.best_fit
-        phase_data = self.lmfit_result.data
-
-        fig_args_ = dict(figsize=(7, 5))
-        fig_args_.update(figArgs)
-        plt.figure(**fig_args_)
-        plt.title('phase')
-        plt.plot(self.freqData, phase_data, '.')
-        plt.plot(self.freqData, phase_fit)
-        plt.show()
-
-    def print(self):
-        print(f'f (Hz): {rounder(self.f0, 9)}+-{rounder(self.params["f0"].stderr, 9)}')
-        print(f'Qext: {rounder(self.Qext, 5)}+-{rounder(self.params["Qext"].stderr, 5)}')
-        print(f'Qint: {rounder(self.Qint, 5)}+-{rounder(self.params["Qint"].stderr, 5)}')
-        print('Q_tot: ', rounder(self.Qtot, 5))
-        print('T1 (s):', rounder(self.Qtot / self.f0 / 2 / np.pi, 5), '\nMaxT1 (s):',
-              rounder(self.Qint / self.f0 / 2 / np.pi, 5))
-        print('kappa/2Pi: ', rounder(self.f0 / self.Qtot / 1e6), 'MHz')
+    def run(self, *args: Any, **kwargs: Any):
+        self._fit_circ_and_phase()
+        params = self.extract_params()
+        return HangerResult(self.coordinates, self.data, params)
 
 
-class CavReflectionPhaseOnly(Fit):
+class HangerResult(ResonatorResult):
+    def __init__(self, freq, data, params):
+        self.Qc = params.pop("Qc")
+        self.Qi = params.pop("Qi")
+        super().__init__(freq, data, params)
+
+
+
+class ReflFit(ResonatorFit):
     def __init__(self, coordinates: Union[Tuple[np.ndarray, ...], np.ndarray],
-                 data: np.ndarray, conjugate:bool=True):
-        """ fit cavity reflection function phase only.
-
-        :param conjugate: fit to conjugated cavity reflection function (for VNA data)
-        """
-        self.coordinates = coordinates
-        self.data = data
-        self.conjugate = conjugate
-        self.pre_process()
-
-    def pre_process(self):
-        self.data = np.unwrap(np.angle(self.data))
-
-    def model(self, coordinates, Qext, Qint, f0, phaseOff, eDelay) -> np.ndarray:
-        """"reflection function of a harmonic oscillator"""
-        S11 = cav_ref_func(coordinates, Qext, Qint, f0)
-        if self.conjugate:
-            S11 = S11.conjugate()
-        S11 *= np.exp(1j * (phaseOff + eDelay * (coordinates - f0) * TWOPI))
-        phase = np.unwrap(np.angle(S11))
-        return phase
+                 data: np.ndarray):
+        super().__init__(coordinates, data)
 
     @staticmethod
-    def guess(coordinates, data):
-        freq = coordinates
-        phase = data
+    def model(coordinates, f0, Ql, Qc, amp, phase_off, e_delay) -> np.ndarray:
+        s21 = refl_func(coordinates, f0, Ql, Qc, amp, phase_off, e_delay)
+        return s21
 
-        # f0_idx = int(np.floor(np.average(np.where(abs(phase - np.average(phase)) < 0.2))))
-        f0_idx = len(phase)//2
-        f0Guess = freq[f0_idx]
-        phaseOffGuess = np.mean(phase)
-        eDelayGuess = (phase[f0_idx//3] - phase[0]) / (freq[f0_idx//3] - freq[0]) / TWOPI
+    def extract_params(self):
+        beta = self.theta0 + PI
+        x_ = self.xc + self.rc * np.cos(beta)
+        y_ = self.yc + self.rc * np.sin(beta)
+        phase_off = np.angle(x_ + 1j*y_)
+        amp = np.sqrt(x_**2 + y_**2)
+        Qc = self.Ql * amp/ (self.rc)
+        Qi = 1/(1/self.Ql - 1/Qc)
 
-        # guess algorithm from https://lmfit.github.io/lmfit-py/examples/example_complex_resonator_model.html
-        Q_min = 0.1 * (f0Guess / (freq[-1] - freq[0]))  # assume the user isn't trying to fit just a small part of a resonance curve
-        delta_f = np.diff(freq)  # assume f is sorted
-        min_delta_f = delta_f[delta_f > 0].min()
-        Q_max = f0Guess / min_delta_f  # assume data actually samples the resonance reasonably
-        QtotGuess = np.sqrt(Q_min * Q_max)  # geometric mean, why not?
-        QextGuess = QtotGuess * 2
-        QintGuess = 1 / (1 / QtotGuess - 1 / QextGuess)
+        params = {"f0": self.f0, "Ql": self.Ql, "Qc": Qc, "amp": amp, "phase_off": phase_off,
+                  "e_delay": self.e_delay, "Qi": Qi, "model":self.model}
 
-        Qext = lmfit.Parameter("Qext", value=QextGuess, min=QextGuess / 100, max=QextGuess * 100)
-        Qint = lmfit.Parameter("Qint", value=QintGuess, min=QintGuess / 100, max=QintGuess * 100)
-        f0 = lmfit.Parameter("f0", value=f0Guess, min=freq[0], max=freq[-1])
-        phaseOff = lmfit.Parameter("phaseOff", value=phaseOffGuess, min=-TWOPI*4, max=TWOPI*4)
-        eDelay = lmfit.Parameter("eDelay", value=eDelayGuess)
+        return params
 
-        return dict(Qext=Qext, Qint=Qint, f0=f0, phaseOff=phaseOff, eDelay=eDelay)
+    def run(self, *args: Any, **kwargs: Any):
+        self._fit_circ_and_phase()
+        params = self.extract_params()
+        return ReflResult(self.coordinates, self.data, params)
 
-    def run(self, *args: Any, **kwargs: Any) -> CavReflectionResult_Phase:
-        lmfit_result = self.analyze(self.coordinates, self.data, *args, **kwargs)
-        return CavReflectionResult_Phase(lmfit_result)
 
+class ReflResult(ResonatorResult):
+    def __init__(self, freq, data, params):
+        self.Qc = params["Qc"]
+        self.Qi = params.pop("Qi")
+        super().__init__(freq, data, params)
+
+
+
+
+class TransFit(ResonatorFit):
+    def __init__(self, coordinates: Union[Tuple[np.ndarray, ...], np.ndarray],
+                 data: np.ndarray):
+        super().__init__(coordinates, data)
+
+    @staticmethod
+    def model(coordinates, f0, Ql, amp, phase_off, e_delay) -> np.ndarray:
+        s21 = trans_func(coordinates, f0, Ql, amp, phase_off, e_delay)
+        return s21
+
+    def extract_params(self):
+        params = {"f0": self.f0, "Ql": self.Ql, "amp": self.rc/self.Ql, "phase_off": self.theta0,
+                  "e_delay": self.e_delay, "model":self.model}
+
+        return params
+
+    def run(self, *args: Any, **kwargs: Any):
+        self._fit_circ_and_phase()
+        params = self.extract_params()
+        return TransResult(self.coordinates, self.data, params)
+
+
+class TransResult(ResonatorResult):
+    def __init__(self, freq, data, params):
+        super().__init__(freq, data, params)
 
 
 
 if __name__ == '__main__':
-    import h5py
-    filepath = r'L:\Data\WISPE3D\Modes\20210809\CavModes\Cav'
-    (freq, real, imag, mag, phase) = getVNAData(filepath, plot=0)
+    # test params
+    f_list = np.linspace(5.02e9, 5.08e9, 1001)
+    f0_ = 5.05e9
+    Ql_ = 1e3
+    Qc_m_ = 3e3
+    amp_ = 1e-3
+    phase_off_ = np.pi / 2.33 * 3
+    e_delay_ = 2e-9 * 2
+    phi_ = np.pi / 10 * 3
 
-    cavRef = CavReflection(freq, real + 1j * imag)
-    results = cavRef.run(params={"Qext": lmfit.Parameter("Qext", value=3.48354e+03), "Qint": lmfit.Parameter("Qint", value=7e3)})
-    results.plot()
-    results.print()
-    print(cavRef.guess(cavRef.coordinates, cavRef.data))
+    # # ----------- generate test hanger data
+    # data = hanger_func(f_list, f0_, Ql_, Qc_m_, amp_, phase_off_, e_delay_, phi_)
+    # data += (np.random.rand(len(data)) + 1j * np.random.rand(len(data))) * amp_ *0.05
+    # fig, ax = plt.subplots(1, 2)
+    # ax[0].plot(f_list, np.abs(data))
+    # ax[1].plot(f_list, np.unwrap(np.angle(data)))
+    # # ----------------- fit hanger
+    # hf = HangerFit(f_list, data).run()
+    # hf.plot()
+    # hf.print()
+    #
+    # # # -------------- compare with old code
+    # from QuDataProcessing.fitter.cavity_functions_hanger import CavHanger
+    # hf_old = CavHanger(f_list, data).run()
+    # hf_old.plot()
+    # hf_old.print()
 
-    # results = cavRef.run(dry=True, params={"Qext": lmfit.Parameter("Qext", value=3.48354e+03), "Qint": lmfit.Parameter("Qint", value=7e3)})
-    # results.lmfit_result.plot()
+
+
+    # # --------------- generate reflection test data
+    # data = refl_func(f_list, f0_, Ql_, Qc_m_, amp_, phase_off_, e_delay_)
+    # data += (np.random.rand(len(data)) + 1j * np.random.rand(len(data))) * amp_ *0.03
+    # plt.figure()
+    # plt.plot(data.real, data.imag, ".")
+    # # # -------------- fit reflection
+    # rf = ReflFit(f_list, data).run()
+    # rf.plot()
+    # rf.print()
+    # ---------- compare with old code
+    # from QuDataProcessing.fitter.cavity_functions import CavReflection
+    # rf_old = CavReflection(f_list, data).run()
+    # rf_old.plot()
+
+
+    # # --------------- generate transmission test data
+    data = trans_func(f_list, f0_, Ql_, amp_, phase_off_, e_delay_)
+    data += (np.random.rand(len(data)) + 1j * np.random.rand(len(data))) * amp_ * Qc_m_ *0.02
+    fig, ax = plt.subplots(1, 2)
+    ax[0].plot(f_list, np.abs(data))
+    ax[1].plot(f_list, np.unwrap(np.angle(data)))
+    # # -------------- fit reflection
+    tf = TransFit(f_list, data).run()
+    tf.plot()
+    tf.print()
+    # # ---------- compare with old code
+
+
+
+
+    # ------------- test find circ 0 ------------------------------
+    # x = data.real
+    # y = data.imag
+    #
+    # z = x ** 2 + y ** 2
+    # v = np.array([z, x, y, np.ones_like(x)])
+    # M = np.matmul(v, v.T)
+    # B = np.zeros((4, 4))
+    # B[0, 3] = B[3, 0] = -2
+    #
+    # # to solve for eta_, Newton iteration is overkill and not efficient
+    # # M - eta_ * B is a quadratic function (since B only have two non-zero elements),
+    # # we just need to find the coefficients for this quadratic function
+    # c2 = 4 * (M[1, 2] * M[2, 1] - M[1, 1] * M[2, 2])
+    # c0 = linalg.det(M)
+    # c1 = linalg.det(M - B) - c2 - c0
+    #
+    # # minimum positive root for the quadratic function
+    # c_dis = np.sqrt(c1 ** 2 - 4 * c2 * c0)
+    # v1, v2 = (-c1 + c_dis) / 2 / c2, (-c1 - c_dis) / 2 / c2
+    # print(v1, v2)
+    # eta_ = min([v_ for v_ in [v1, v2] if v_ > 0], default=None)
+    #
+    #
+    #
+    # def solve_eta(eta):
+    #     return linalg.det(M - eta * B)
+    # eta_ = newton(solve_eta, 0)
+    #
+    #
+    # print(eta_, linalg.det(M - eta_ * B), linalg.det(M))
+    #
+    # a, b, c, d = linalg.null_space(M - eta_ * B)[:, 0]
+    # x0 = - b / 2 / a
+    # y0 = - c / 2 / a
+    # r0 = np.sqrt(b ** 2 + c ** 2 - 4 * a * d) / 2 / abs(a)
+    # plt.figure()
+    # plt.plot(data.real, data.imag, ".-")
+    # theta_ = np.linspace(0, TWOPI, 1001)
+    # plt.plot(x0 + r0*np.cos(theta_), y0 + r0*np.sin(theta_))
+
+
+    # # -------------- test fit e_delay --------------------------
+    # def circ_res(tau):
+    #     rot_data = np.exp(1j * TWOPI * f_list * tau) * data
+    #     x, y = rot_data.real, rot_data.imag
+    #     x0, y0, r0 = fit_circle(x, y)
+    #     return np.sum((r0 ** 2 - (x - x0) ** 2 - (y - y0) ** 2) ** 2)
+    #
+    #
+    # tl = np.linspace(0e-9, 20e-9, 501)
+    # plt.figure()
+    # plt.plot(tl, [circ_res(t_) for t_ in tl])
+    #
+    # tau0 = guess_e_delay(f_list, data)
+    # # tau0 = e_delay
+    # # tau_fit = minimize(circ_res, tau0, method="Nelder-Mead").x[0]
+    # # tau_fit = minimize(circ_res, tau0, method="Powell").x[0]
+    # tau_fit = least_squares(circ_res, tau0, method="lm").x[0]
+    # print(tau_fit, e_delay_)
+    #
+    # new_data = data * np.exp(1j * tau_fit * TWOPI * f_list)
+    # plt.figure()
+    # plt.plot(new_data.real, new_data.imag, ".")
+    # fit_cir_new = fit_circle(new_data.real, new_data.imag)
+    # theta_ = np.linspace(0, TWOPI, 1001)
+    # plt.plot(fit_cir_new[0] + fit_cir_new[2] * np.cos(theta_), fit_cir_new[1] + fit_cir_new[2] * np.sin(theta_))
+
+    # ------------- test fit phase ------------------------------
+    # # translate circle data to origin
+    # data_tr = new_data - (fit_cir_new[0] + 1j * fit_cir_new[1])
+    # # phase fit
+    # data_tr_phase = np.unwrap(np.angle(data_tr))
+    # phase = data_tr_phase
+    # freq = f_list
+    # def phse_func(f, theta0, Ql, f0):
+    #     theta = theta0 - 2 * np.arctan(2 * Ql * (f / f0 - 1))
+    #     return theta
+    #
+    # model = Model(phse_func)
+    # theta0_gue = (phase[0] + phase[-1]) / 2
+    # f0_gue = freq[np.argmin(np.abs(phase - theta0_gue))]
+    # Ql_gue = np.mean(freq) / (np.max(freq) - np.min(freq)) * 5
+    # params = {}
+    # params["theta0"] = Parameter("theta0", theta0_gue)
+    # params["f0"] = Parameter("f0", f0_gue, min=np.min(freq), max=np.max(freq))
+    # params["Ql"] = Parameter("Ql", Ql_gue, min=Ql_gue / 50, max=Ql_gue * 50)
+    # fit_result = model.fit(phase, f=freq, **params)
+    # fit_result.plot()
+
+    #
+    #
+    #
+
+
+
+
+
+
+    # plt.figure()
+    # el = np.linspace(-10,10, 1001)
+    # plt.plot(el, [linalg.det(M-e_*B) for e_ in el])
+    # plt.plot(el, np.ones_like(el))
+    # plt.plot(el, c2*el**2 + c1*el+c0)
