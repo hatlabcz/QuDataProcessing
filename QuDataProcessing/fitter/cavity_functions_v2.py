@@ -60,6 +60,16 @@ def trans_func(f, f0, Ql, amp, phase_off, e_delay):
     return s21
 
 
+def approximate_null_space(A):
+    """
+    Compute an approximate null space of a matrix A using SVD.
+    """
+    U, S, Vt = linalg.svd(A)
+    null_idx = np.argmin(np.abs(S))
+    aprox_space = Vt[null_idx, :].T
+    return aprox_space
+
+
 def fit_circle(x, y):
     """
     fit complex data (x, y) to a circle on the complex plane
@@ -95,7 +105,7 @@ def fit_circle(x, y):
 
     eta_ = newton(solve_eta, 0)
 
-    a, b, c, d = linalg.null_space(M - eta_ * B)[:, 0]
+    a, b, c, d = approximate_null_space(M - eta_ * B)
     x0 = - b / 2 / a
     y0 = - c / 2 / a
     r0 = np.sqrt(b ** 2 + c ** 2 - 4 * a * d) / 2 / abs(a)
