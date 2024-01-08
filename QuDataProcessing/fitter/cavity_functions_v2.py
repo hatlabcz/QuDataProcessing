@@ -103,7 +103,7 @@ def fit_circle(x, y):
     return x0, y0, r0
 
 
-def guess_e_delay(freq, data, debug=True):
+def guess_e_delay(freq, data, debug=False):
     """
     guess electrical delay
     :param freq: frequency array
@@ -322,10 +322,29 @@ class ReflFit(ResonatorFit):
                   "e_delay": self.e_delay, "Qi": Qi, "model":self.model}
 
         return params
+    
+    def re_fit(self, guess_params):
+        model = Model(self.model)
+        fit_params = model.make_params()
+        for k, v in fit_params.items():
+            v.value = guess_params[k]
+            v.min = v.value - 0.1 * np.abs(v.value)
+            v.max = v.value + 0.1 * np.abs(v.value)
 
-    def run(self, *args: Any, **kwargs: Any):
+        fit_result = model.fit(self.data, coordinates=self.coordinates, **fit_params)
+        return fit_result
+
+    
+    def run(self, refit=False):
         self._fit_circ_and_phase()
         params = self.extract_params()
+
+        if refit:
+            fit_result = self.re_fit(params)
+            for k, v in fit_result.params.items():
+                params[k] = v.value
+            params["Qi"] = 1 / (1 / params["Ql"] - 1 / params["Qc"])
+
         return ReflResult(self.coordinates, self.data, params)
 
 
@@ -334,7 +353,6 @@ class ReflResult(ResonatorResult):
         self.Qc = params["Qc"]
         self.Qi = params.pop("Qi")
         super().__init__(freq, data, params)
-
 
 
 
@@ -377,16 +395,16 @@ if __name__ == '__main__':
     e_delay_ = 2e-9 * 2
     phi_ = np.pi / 10 * 3
 
-    # # ----------- generate test hanger data
-    # data = hanger_func(f_list, f0_, Ql_, Qc_m_, amp_, phase_off_, e_delay_, phi_)
-    # data += (np.random.rand(len(data)) + 1j * np.random.rand(len(data))) * amp_ *0.05
-    # fig, ax = plt.subplots(1, 2)
-    # ax[0].plot(f_list, np.abs(data))
-    # ax[1].plot(f_list, np.unwrap(np.angle(data)))
-    # # ----------------- fit hanger
-    # hf = HangerFit(f_list, data).run()
-    # hf.plot()
-    # hf.print()
+    # ----------- generate test hanger data
+    data = hanger_func(f_list, f0_, Ql_, Qc_m_, amp_, phase_off_, e_delay_, phi_)
+    data += (np.random.rand(len(data)) + 1j * np.random.rand(len(data))) * amp_ *0.05
+    fig, ax = plt.subplots(1, 2)
+    ax[0].plot(f_list, np.abs(data))
+    ax[1].plot(f_list, np.unwrap(np.angle(data)))
+    # ----------------- fit hanger
+    hf = HangerFit(f_list, data).run()
+    hf.plot()
+    hf.print()
     #
     # # # -------------- compare with old code
     # from QuDataProcessing.fitter.cavity_functions_hanger import CavHanger
@@ -402,9 +420,10 @@ if __name__ == '__main__':
     # plt.figure()
     # plt.plot(data.real, data.imag, ".")
     # # # -------------- fit reflection
-    # rf = ReflFit(f_list, data).run()
+    # rf = ReflFit(f_list, data).run(0)
     # rf.plot()
     # rf.print()
+
     # ---------- compare with old code
     # from QuDataProcessing.fitter.cavity_functions import CavReflection
     # rf_old = CavReflection(f_list, data).run()
@@ -412,15 +431,15 @@ if __name__ == '__main__':
 
 
     # # --------------- generate transmission test data
-    data = trans_func(f_list, f0_, Ql_, amp_, phase_off_, e_delay_)
-    data += (np.random.rand(len(data)) + 1j * np.random.rand(len(data))) * amp_ * Qc_m_ *0.02
-    fig, ax = plt.subplots(1, 2)
-    ax[0].plot(f_list, np.abs(data))
-    ax[1].plot(f_list, np.unwrap(np.angle(data)))
-    # # -------------- fit reflection
-    tf = TransFit(f_list, data).run()
-    tf.plot()
-    tf.print()
+    # data = trans_func(f_list, f0_, Ql_, amp_, phase_off_, e_delay_)
+    # data += (np.random.rand(len(data)) + 1j * np.random.rand(len(data))) * amp_ * Qc_m_ *0.02
+    # fig, ax = plt.subplots(1, 2)
+    # ax[0].plot(f_list, np.abs(data))
+    # ax[1].plot(f_list, np.unwrap(np.angle(data)))
+    # # # -------------- fit reflection
+    # tf = TransFit(f_list, data).run()
+    # tf.plot()
+    # tf.print()
     # # ---------- compare with old code
 
 
