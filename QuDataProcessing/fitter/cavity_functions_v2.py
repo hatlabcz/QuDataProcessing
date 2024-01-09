@@ -11,6 +11,11 @@ from QuDataProcessing.helpers.unit_converter import freqUnit, rounder, realImag2
 TWOPI = 2 * np.pi
 PI = np.pi
 
+"""
+resonator freq domain msmt based on method in this papar
+https://arxiv.org/abs/1410.3365
+"""
+
 
 def core_func(f, f0, Ql, Qc):
     """
@@ -137,7 +142,7 @@ def guess_e_delay(freq, data, debug=False):
     return tau
 
 
-def fit_e_delay(freq, data):
+def fit_e_delay(freq, data, debug=False):
     """
     find the e_delay that makes the curve most closely to a circle
     :param freq: frequency array
@@ -151,13 +156,13 @@ def fit_e_delay(freq, data):
         x0, y0, r0 = fit_circle(x, y)
         return np.sum(abs(r0 ** 2 - (x - x0) ** 2 - (y - y0) ** 2))
 
-    tau0 = guess_e_delay(freq, data)
+    tau0 = guess_e_delay(freq, data, debug)
     tau_fit = least_squares(circ_residual, tau0, method="lm").x[0]
 
     return tau_fit
 
 
-def fit_phase(freq, phase):
+def fit_phase(freq, phase, debug=False):
     def phse_func(f, theta0, Ql, f0):
         theta = theta0 - 2 * np.arctan(2 * Ql * (f / f0 - 1))
         return theta
@@ -170,6 +175,8 @@ def fit_phase(freq, phase):
     params["theta0"] = Parameter("theta0", theta0_gue)
     params["f0"] = Parameter("f0", f0_gue, min=np.min(freq), max=np.max(freq))
     params["Ql"] = Parameter("Ql", Ql_gue, min=Ql_gue / 50, max=Ql_gue * 50)
+    if debug:
+        print(params)
     fit_result = model.fit(phase, f=freq, **params)
 
     return fit_result
@@ -187,7 +194,7 @@ class ResonatorFit(Fit):
         data = self.data
 
         # fit for e_delay
-        self.e_delay = fit_e_delay(freq, data)
+        self.e_delay = fit_e_delay(freq, data, debug)
         # circle data after fixing e_delay
         data_cir = data * np.exp(1j * self.e_delay * TWOPI * freq)
         # fitted circle
@@ -197,7 +204,7 @@ class ResonatorFit(Fit):
 
         # phase fit
         data_tr_phase = np.unwrap(np.angle(data_tr))
-        phase_fit_res = fit_phase(freq, data_tr_phase)
+        phase_fit_res = fit_phase(freq, data_tr_phase, debug)
         self.theta0 = phase_fit_res.params["theta0"].value
         self.Ql = phase_fit_res.params["Ql"].value
         self.f0 = phase_fit_res.params["f0"].value
@@ -225,7 +232,7 @@ class ResonatorResult():
         self.f0 = params["f0"]
         self.Ql = params["Ql"]
 
-    def plot(self, **figArgs):
+    def plot(self, plot_axes=None, **figArgs):
         fitted_data = self.model(self.freq, **self.params)
         real_fit = fitted_data.real
         imag_fit = fitted_data.imag
@@ -234,15 +241,17 @@ class ResonatorResult():
 
         fig_args_ = dict(figsize=(12, 5))
         fig_args_.update(figArgs)
-        plt.figure(**fig_args_)
-        plt.subplot(1, 2, 1)
-        plt.title('mag (dB pwr)')
-        plt.plot(self.freq, mag_data, '.')
-        plt.plot(self.freq, mag_fit)
-        plt.subplot(1, 2, 2)
-        plt.title('phase')
-        plt.plot(self.freq, phase_data, '.')
-        plt.plot(self.freq, phase_fit)
+
+        if plot_axes is None:
+            fig, ax = plt.subplots(1, 2, **fig_args_)
+        else:
+            ax = plot_axes
+        ax[0].set_title('mag (dB pwr)')
+        ax[0].plot(self.freq, mag_data, '.')
+        ax[0].plot(self.freq, mag_fit)
+        ax[1].set_title('phase')
+        ax[1].plot(self.freq, phase_data, '.')
+        ax[1].plot(self.freq, phase_fit)
         plt.show()
 
     def print(self):
@@ -295,8 +304,8 @@ class HangerFit(ResonatorFit):
 
         return params
 
-    def run(self, *args: Any, **kwargs: Any):
-        self._fit_circ_and_phase()
+    def run(self, debug=True):
+        self._fit_circ_and_phase(debug)
         params = self.extract_params()
         return HangerResult(self.coordinates, self.data, params)
 
@@ -345,8 +354,8 @@ class ReflFit(ResonatorFit):
         return fit_result
 
     
-    def run(self, refit=False):
-        self._fit_circ_and_phase()
+    def run(self, debug=True, refit=False):
+        self._fit_circ_and_phase(debug)
         params = self.extract_params()
 
         if refit:
@@ -382,8 +391,8 @@ class TransFit(ResonatorFit):
 
         return params
 
-    def run(self, *args: Any, **kwargs: Any):
-        self._fit_circ_and_phase()
+    def run(self, debug=True):
+        self._fit_circ_and_phase(debug)
         params = self.extract_params()
         return TransResult(self.coordinates, self.data, params)
 
@@ -402,7 +411,7 @@ if __name__ == '__main__':
     Qc_m_ = 3e3
     amp_ = 1e-3
     phase_off_ = np.pi / 2.33 * 3
-    e_delay_ = 2e-9 * 2
+    e_delay_ = -2e-9 * 2
     phi_ = np.pi / 10 * 3
 
     # ----------- generate test hanger data
