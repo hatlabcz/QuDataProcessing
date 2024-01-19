@@ -55,8 +55,12 @@ def rounder(value, digit=5):
     return f"{value:.{digit}e}"
 
 
-def magPhase2realImag(mag, phase):
+def magPhase2realImag(mag, phase, phase_unit="rad"):
     lin = 10 ** (mag / 20.0)
+    if phase_unit == "deg":
+        phase = phase / 180 * np.pi
+    elif phase_unit != "rad":
+        raise NameError("wrong phse_unit")
     real = lin * np.cos(phase)
     imag = lin * np.sin(phase)
     return real, imag

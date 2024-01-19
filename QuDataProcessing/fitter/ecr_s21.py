@@ -32,7 +32,9 @@ class ECR_S21Result():
         self.freqData = lmfit_result.userkws[lmfit_result.model.independent_vars[0]]
 
     def plot(self, title='s21  dB', plot_ax=None, **figArgs):
-        mag_fit = 20 * np.log10(self.lmfit_result.best_fit)
+        fitted_freq = np.linspace(self.freqData[0], self.freqData[-1], len(self.freqData)*20+1)
+        mag_fit = ecr_f21(fitted_freq, **self.lmfit_result.best_values)
+        mag_fit = 20 * np.log10(mag_fit)
         mag_data = 20 * np.log10(self.lmfit_result.data.real)
 
         fig_args_ = dict(figsize=(6, 5))
@@ -44,7 +46,7 @@ class ECR_S21Result():
             ax = plot_ax
         ax.set_title(title)
         ax.plot(self.freqData, mag_data, '.')
-        ax.plot(self.freqData, mag_fit)
+        ax.plot(fitted_freq, mag_fit)
         plt.show()
 
         return ax
@@ -81,9 +83,10 @@ class ECR_S21(Fit):
         QlGuess = fnGuess / (freq[-1] - freq[0]) * 4
         c1Guess = data[0]
 
-        Ql = lmfit.Parameter("Ql", value=QlGuess, min=QlGuess/100, max=fnGuess / (freq[1] - freq[0]) * 1) # todo: to be tuned
+        Ql = lmfit.Parameter("Ql", value=QlGuess, min=QlGuess/100, max=QlGuess*100) # todo: to be tuned
         sn = lmfit.Parameter("sn", value=snGuess, min=0)
         fn = lmfit.Parameter("fn", value=fnGuess, min=fnGuess - (freq[-1] - freq[0])*0.2, max=fnGuess + (freq[-1] - freq[0])*0.2)
+        # fn = lmfit.Parameter("fn", value=fnGuess, min=freq[-1], max=freq[0])
         c1 = lmfit.Parameter("c1", value=c1Guess)
         c2 = lmfit.Parameter("c2", value=c2Guess)
 

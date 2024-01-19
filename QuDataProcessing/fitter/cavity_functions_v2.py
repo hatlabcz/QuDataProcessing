@@ -12,8 +12,10 @@ TWOPI = 2 * np.pi
 PI = np.pi
 
 """
-resonator freq domain msmt based on method in this papar
+resonator fitting based on method in this papar
 https://arxiv.org/abs/1410.3365
+works quite well for hanger, reflection and transmission to be improved.
+Also error bar need to be added.
 """
 
 
@@ -174,7 +176,7 @@ def fit_phase(freq, phase, debug=False):
     params = {}
     params["theta0"] = Parameter("theta0", theta0_gue)
     params["f0"] = Parameter("f0", f0_gue, min=np.min(freq), max=np.max(freq))
-    params["Ql"] = Parameter("Ql", Ql_gue, min=Ql_gue / 50, max=Ql_gue * 50)
+    params["Ql"] = Parameter("Ql", Ql_gue, min=Ql_gue / 400, max=Ql_gue * 400)
     if debug:
         print(params)
     fit_result = model.fit(phase, f=freq, **params)
@@ -408,11 +410,11 @@ if __name__ == '__main__':
     f_list = np.linspace(5.02e9, 5.08e9, 1001)
     f0_ = 5.05e9
     Ql_ = 1e3
-    Qc_m_ = 3e3
-    amp_ = 1e-3
-    phase_off_ = np.pi / 2.33 * 3
-    e_delay_ = -2e-9 * 2
-    phi_ = np.pi / 10 * 3
+    Qc_m_ = 2e3
+    amp_ = 1
+    phase_off_ = np.pi / 2.33 * 0
+    e_delay_ = -2e-9 * 0
+    phi_ = np.pi / 10 * 0
 
     # ----------- generate test hanger data
     data = hanger_func(f_list, f0_, Ql_, Qc_m_, amp_, phase_off_, e_delay_, phi_)
