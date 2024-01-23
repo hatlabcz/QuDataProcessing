@@ -17,7 +17,7 @@ from QuDataProcessing.fitter.arb_gaussian import classify_point, peakfinder_2d
 
 
 from QuDataProcessing.fitter.gaussian_2d import Gaussian2D_2Blob, Gaussian2D_3Blob
-from QuDataProcessing.slider_plot.sliderPlot import sliderHist2d
+from QuDataProcessing.plotting.sliderPlot import sliderHist2d
 
 def auto_hist_range(data_I, data_Q):
     data_max = np.max(np.abs(np.array([data_I, data_Q])))
