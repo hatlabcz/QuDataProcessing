@@ -41,7 +41,7 @@ def cav_hanger_func(freq, Qext, Qint, f0, delta):
     return S21
 
 
-class CavHangerResult():
+class CavHangerSlopeResult():
     def __init__(self, lmfit_result: lmfit.model.ModelResult):
         self.lmfit_result = lmfit_result
         self.params = lmfit_result.params
@@ -49,6 +49,9 @@ class CavHangerResult():
         self.delta = self.params["delta"].value
         self.Qext = self.params["Qext"].value
         self.Qint = self.params["Qint"].value
+        self.slope_phase = self.params["slope_phase"].value
+        self.slope_amp = self.params["slope_amp"].value
+        self.ampOff = self.params["ampOff"].value
         self.Qtot = self.Qext * self.Qint / (self.Qext + self.Qint)
         self.freqData = lmfit_result.userkws[lmfit_result.model.independent_vars[0]]
 
@@ -71,6 +74,120 @@ class CavHangerResult():
         plt.plot(self.freqData, phase_data, '.')
         plt.plot(self.freqData, phase_fit)
         plt.show()
+
+    def print(self):
+        print(f'f (Hz): {rounder(self.f0, 9)}+-{rounder(self.params["f0"].stderr, 9)}')
+        print(f'Qext: {rounder(self.Qext, 5)}+-{rounder(self.params["Qext"].stderr, 5)}')
+        print(f'Qint: {rounder(self.Qint, 5)}+-{rounder(self.params["Qint"].stderr, 5)}')
+        print('Q_tot: ', rounder(self.Qtot, 5))
+        print('T1 (s):', rounder(self.Qtot / self.f0 / 2 / np.pi, 5), '\nMaxT1 (s):',
+              rounder(self.Qint / self.f0 / 2 / np.pi, 5))
+        print('kappa/2Pi: ', rounder(self.f0 / self.Qtot / 1e6), 'MHz')
+
+
+class CavHangerSlope(Fit):
+    def __init__(self, coordinates: Union[Tuple[np.ndarray, ...], np.ndarray],
+                 data: np.ndarray, conjugate:bool=True):
+        """ fit cavity reflection function
+        :param conjugate: fit to conjugated cavity reflection function (for VNA data)
+        """
+        self.coordinates = coordinates
+        self.data = data
+        self.conjugate = conjugate
+        self.pre_process()
+
+    def model(self, coordinates, Qext, Qint, f0, delta, magBack, phaseOff, slope_amp, slope_phase, ampOff) -> np.ndarray:
+        S21 = cav_hanger_func(coordinates, Qext, Qint, f0, delta)
+        if self.conjugate:
+            S21 = S21.conjugate()
+        # S21 *= (slope_amp * self.coordinates + magBack) * np.exp(1j * phaseOff  + 1j * slope_phase * self.coordinates)
+
+        s21_mag = magBack * np.abs(S21) + slope_amp * self.coordinates + ampOff
+        s21_phase = np.angle(S21) + slope_phase * self.coordinates + phaseOff
+        S21  = s21_mag * np.exp(1j*s21_phase)
+
+        return S21
+
+    @staticmethod
+    def guess(coordinates, data):
+        freq = coordinates
+        phase = np.unwrap(np.angle(data))
+        amp = np.abs(data)
+
+        f0Guess = freq[np.argmin(amp)]  # smart guess of "it's probably the lowest point"
+        magBackGuess = np.average(amp[:int(len(freq) / 5)])
+        slopeAmpGuess = (amp[-1] - amp[0])/(freq[-1]-freq[0])
+        ampOffGuess = amp[0] - slopeAmpGuess * freq[0] - magBackGuess
+        slopePhaseGuess = (phase[-1] - phase[0])/(freq[-1]-freq[0])
+        phaseOffGuess = phase[0] - slopePhaseGuess * freq[0]
+
+        # guess algorithm from https://lmfit.github.io/lmfit-py/examples/example_complex_resonator_model.html
+        Q_min = 0.1 * (f0Guess / (freq[-1] - freq[0]))  # assume the user isn't trying to fit just a small part of a resonance curve
+        delta_f = np.diff(freq)  # assume f is sorted
+        min_delta_f = delta_f[delta_f > 0].min()
+        Q_max = f0Guess / min_delta_f  # assume data actually samples the resonance reasonably
+        QtotGuess = np.sqrt(Q_min * Q_max)  # geometric mean, why not?
+
+        QextGuess = QtotGuess * 1.2
+        QintGuess = 1 / (1 / QtotGuess - 1 / QextGuess)
+        deltaGuess = 0
+
+        Qext = lmfit.Parameter("Qext", value=QextGuess, min=QextGuess / 100, max=QextGuess * 100)
+        Qint = lmfit.Parameter("Qint", value=QintGuess, min=QintGuess / 100, max=QintGuess * 100)
+        f0 = lmfit.Parameter("f0", value=f0Guess, min=freq[0], max=freq[-1])
+        magBack = lmfit.Parameter("magBack", value=magBackGuess, min=magBackGuess / 1.1, max=magBackGuess * 1.1)
+        phaseOff = lmfit.Parameter("phaseOff", value=phaseOffGuess, min=-TWOPI, max=TWOPI)
+        delta = lmfit.Parameter("delta", value=deltaGuess, min=-1e9, max=1e9)
+        slope_amp = lmfit.Parameter("slope_amp", value=slopeAmpGuess)
+        slope_phase = lmfit.Parameter("slope_phase", value=slopePhaseGuess)
+        ampOff = lmfit.Parameter("ampOff", value=ampOffGuess)
+
+        return dict(Qext=Qext, Qint=Qint, f0=f0, delta=delta, magBack=magBack,
+                    phaseOff=phaseOff, slope_amp=slope_amp, slope_phase=slope_phase, ampOff=ampOff)
+
+    def run(self, *args: Any, **kwargs: Any) -> CavHangerSlopeResult:
+        lmfit_result = self.analyze(self.coordinates, self.data, *args, **kwargs)
+        return CavHangerSlopeResult(lmfit_result)
+
+
+
+
+
+
+
+
+
+class CavHangerResult():
+    def __init__(self, lmfit_result: lmfit.model.ModelResult):
+        self.lmfit_result = lmfit_result
+        self.params = lmfit_result.params
+        self.f0 = self.params["f0"].value
+        self.delta = self.params["delta"].value
+        self.Qext = self.params["Qext"].value
+        self.Qint = self.params["Qint"].value
+        self.Qtot = self.Qext * self.Qint / (self.Qext + self.Qint)
+        self.freqData = lmfit_result.userkws[lmfit_result.model.independent_vars[0]]
+
+    def plot(self, **figArgs):
+        real_fit = self.lmfit_result.best_fit.real
+        imag_fit = self.lmfit_result.best_fit.imag
+        mag_fit, phase_fit = realImag2magPhase(real_fit, imag_fit)
+        mag_data, phase_data = realImag2magPhase(self.lmfit_result.data.real,
+                                                 self.lmfit_result.data.imag)
+
+        fig_args_ = dict(figsize=(12, 5))
+        fig_args_.update(figArgs)
+        fig = plt.figure(**fig_args_)
+        plt.subplot(1, 2, 1)
+        plt.title('mag (dB pwr)')
+        plt.plot(self.freqData, mag_data, '.')
+        plt.plot(self.freqData, mag_fit)
+        plt.subplot(1, 2, 2)
+        plt.title('phase')
+        plt.plot(self.freqData, phase_data, '.')
+        plt.plot(self.freqData, phase_fit)
+        plt.show()
+        return  fig
 
     def print(self):
         print(f'f (Hz): {rounder(self.f0, 9)}+-{rounder(self.params["f0"].stderr, 9)}')
@@ -121,10 +238,10 @@ class CavHanger(Fit):
         QintGuess = 1 / (1 / QtotGuess - 1 / QextGuess)
         deltaGuess = 0
 
-        Qext = lmfit.Parameter("Qext", value=QextGuess, min=QextGuess / 100, max=QextGuess * 100)
-        Qint = lmfit.Parameter("Qint", value=QintGuess, min=QintGuess / 100, max=QintGuess * 100)
+        Qext = lmfit.Parameter("Qext", value=QextGuess, min=QextGuess / 200, max=QextGuess * 200)
+        Qint = lmfit.Parameter("Qint", value=QintGuess, min=QintGuess / 200, max=QintGuess * 200)
         f0 = lmfit.Parameter("f0", value=f0Guess, min=freq[0], max=freq[-1])
-        magBack = lmfit.Parameter("magBack", value=magBackGuess, min=magBackGuess / 1.1, max=magBackGuess * 1.1)
+        magBack = lmfit.Parameter("magBack", value=magBackGuess, min=magBackGuess / 1.5, max=magBackGuess * 1.5)
         phaseOff = lmfit.Parameter("phaseOff", value=phaseOffGuess, min=-TWOPI, max=TWOPI)
         delta = lmfit.Parameter("delta", value=deltaGuess, min=-1e9, max=1e9)
 
@@ -133,6 +250,7 @@ class CavHanger(Fit):
     def run(self, *args: Any, **kwargs: Any) -> CavHangerResult:
         lmfit_result = self.analyze(self.coordinates, self.data, *args, **kwargs)
         return CavHangerResult(lmfit_result)
+
 
 
 
