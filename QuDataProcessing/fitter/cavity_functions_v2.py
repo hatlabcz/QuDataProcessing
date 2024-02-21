@@ -1,5 +1,6 @@
 from typing import Tuple, Any, Optional, Union, Dict, List
-from scipy.optimize import minimize, newton, least_squares
+from abc import abstractmethod
+from scipy.optimize import minimize, newton, least_squares, approx_fprime
 from scipy import linalg
 import numpy as np
 import matplotlib.pyplot as plt
@@ -191,6 +192,10 @@ class ResonatorFit(Fit):
         self.data = data
         self.pre_process()
 
+    @abstractmethod
+    def model(*args):
+        ...
+
     def _fit_circ_and_phase(self, debug=True):
         freq = self.coordinates
         data = self.data
@@ -225,6 +230,61 @@ class ResonatorFit(Fit):
             ax[1].plot(freq, phase_fit_res.best_fit)
 
 
+
+
+    def calculate_stderr(self, fitted_params:dict):
+        """
+        since we are not using the standard lmfit functions to extract the fitted parameters, we need some
+        manual method to extract the stderr using the residuals and Jacobians
+        :param fitted_params:
+        :return:
+        """
+        raise NotImplementedError("this calculator is not finished!!!")
+        model =  lmfit.Model(self.model)
+        params = model.make_params(**fitted_params)
+
+        print(list(params.keys()), "!!!!!!!!!!!!!!!!!!")
+        print(list(fitted_params.keys()))
+
+        # Manually update parameter values and set them as fixed
+        for name, value in fitted_params.items():
+            params[name].value = value
+            params[name].vary = False  # Important: set to False to not vary these parameters
+
+        # Function to calculate residuals
+        def residuals(p):
+            # Update parameter values
+            for i, name in enumerate(params):
+                params[name].value = p[i]
+            # Calculate residuals
+            return self.data - model.eval(params=params, coordinates=self.coordinates)
+
+        # Initial parameter values for Jacobian calculation
+        p0 = [params[name].value for name in params]
+        # Use epsilon for finite difference approximation
+        epsilon = np.sqrt(np.finfo(float).eps)
+        # Calculate the Jacobian matrix
+        J = approx_fprime(p0, residuals, epsilon)
+        # Compute the covariance matrix
+        cov_matrix = np.linalg.inv(J.T @ J)  # Assuming residuals are normally distributed
+        # Compute standard errors
+        stderrs = np.sqrt(np.diag(cov_matrix))
+        # Assign stderrs back to params
+        for i, name in enumerate(params):
+            params[name].stderr = stderrs[i]
+        return params
+
+
+
+
+
+
+
+
+
+
+
+
 class ResonatorResult():
     def __init__(self, freq, data, params):
         self.freq = freq
@@ -248,6 +308,7 @@ class ResonatorResult():
             fig, ax = plt.subplots(1, 2, **fig_args_)
         else:
             ax = plot_axes
+            fig=None
         ax[0].set_title('mag (dB pwr)')
         ax[0].plot(self.freq, mag_data, '.')
         ax[0].plot(self.freq, mag_fit)
@@ -255,6 +316,7 @@ class ResonatorResult():
         ax[1].plot(self.freq, phase_data, '.')
         ax[1].plot(self.freq, phase_fit)
         plt.show()
+        return fig, ax
 
     def print(self):
         print(f'f (Hz): {self.f0:.6e}')
@@ -304,6 +366,7 @@ class HangerFit(ResonatorFit):
         params = {"f0": self.f0, "Ql": self.Ql, "Qc_m": Qc_m, "amp": amp, "phase_off": phase_off,
                   "e_delay": self.e_delay, "phi": phi, "Qc": Qc, "Qi": Qi, "model":self.model}
 
+
         return params
 
     def run(self, debug=True):
@@ -316,6 +379,8 @@ class HangerResult(ResonatorResult):
     def __init__(self, freq, data, params):
         self.Qc = params.pop("Qc")
         self.Qi = params.pop("Qi")
+        self.Qc_m = params["Qc_m"]
+        self.phi = params["phi"]
         super().__init__(freq, data, params)
 
 

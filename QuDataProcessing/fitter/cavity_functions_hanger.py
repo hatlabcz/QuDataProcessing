@@ -163,31 +163,32 @@ class CavHangerResult():
         self.params = lmfit_result.params
         self.f0 = self.params["f0"].value
         self.delta = self.params["delta"].value
-        self.Qext = self.params["Qext"].value
-        self.Qint = self.params["Qint"].value
-        self.Qtot = self.Qext * self.Qint / (self.Qext + self.Qint)
+        self.Qext = self.Qc = self.params["Qext"].value
+        self.Qint = self.Qi = self.params["Qint"].value
+        self.Qtot = self.Ql = self.Qext * self.Qint / (self.Qext + self.Qint)
         self.freqData = lmfit_result.userkws[lmfit_result.model.independent_vars[0]]
 
-    def plot(self, **figArgs):
+    def plot(self, plot_axes=None, **figArgs):
         real_fit = self.lmfit_result.best_fit.real
         imag_fit = self.lmfit_result.best_fit.imag
         mag_fit, phase_fit = realImag2magPhase(real_fit, imag_fit)
         mag_data, phase_data = realImag2magPhase(self.lmfit_result.data.real,
                                                  self.lmfit_result.data.imag)
-
-        fig_args_ = dict(figsize=(12, 5))
+        fig_args_ = dict(figsize=(16, 5))
         fig_args_.update(figArgs)
-        fig = plt.figure(**fig_args_)
-        plt.subplot(1, 2, 1)
-        plt.title('mag (dB pwr)')
-        plt.plot(self.freqData, mag_data, '.')
-        plt.plot(self.freqData, mag_fit)
-        plt.subplot(1, 2, 2)
-        plt.title('phase')
-        plt.plot(self.freqData, phase_data, '.')
-        plt.plot(self.freqData, phase_fit)
+        if plot_axes is None:
+            fig, ax = plt.subplots(1, 2,  **figArgs)
+        else:
+            ax = plot_axes
+            fig=None
+        ax[0].set_title('mag (dB pwr)')
+        ax[0].plot(self.freqData, mag_data, '.')
+        ax[0].plot(self.freqData, mag_fit)
+        ax[1].set_title('phase')
+        ax[1].plot(self.freqData, phase_data, '.')
+        ax[1].plot(self.freqData, phase_fit)
         plt.show()
-        return  fig
+        return  fig, ax
 
     def print(self):
         print(f'f (Hz): {rounder(self.f0, 9)}+-{rounder(self.params["f0"].stderr, 9)}')
